@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: static-nfs-pv-demo-app2
+  labels:
+    storage-type: nfs
+    migration-group: nfs-server-migration
+    app.kubernetes.io/name: nfs-pv-writer-app2
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: nfs-static-pv-demo-app2
+    name: static-nfs-pvc-demo-app2
+  nfs:
+    server: 10.0.0.10
+    path: /exports/ocp-static-nfs-pv-demo-app2

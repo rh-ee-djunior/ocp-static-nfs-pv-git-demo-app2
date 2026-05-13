@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nfs-pv-writer-app2-code
+  namespace: nfs-static-pv-demo-app2
+  labels:
+    app.kubernetes.io/name: nfs-pv-writer-app2
+data:
+  server.py: |
+    import hashlib
+    import json
+    import os
+    import random
+    import string
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    DATA_DIR = os.environ.get("DATA_DIR", "/data")
+    PORT = int(os.environ.get("PORT", "8080"))
+
+
+    def ensure_dirs():
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(os.path.join(DATA_DIR, "generated"), exist_ok=True)
+
+
+    def sha256_file(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+
+    def list_files():
+        ensure_dirs()
+        result = []
+        for root, _, files in os.walk(DATA_DIR):
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, DATA_DIR)
+                stat = os.stat(full)
+                result.append({
+                    "file": rel,
+                    "size_bytes": stat.st_size,
+                    "mtime": int(stat.st_mtime),
+                    "sha256": sha256_file(full),
+                })
+        return sorted(result, key=lambda item: item["file"])
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, status, payload):
+            body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            print("%s - - [%s] %s" % (self.client_address[0], self.log_date_time_string(), fmt % args), flush=True)
+
+        def do_GET(self):
+            ensure_dirs()
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+
+            if parsed.path == "/healthz":
+                return self._json(200, {"status": "ok", "data_dir": DATA_DIR})
+
+            if parsed.path == "/":
+                return self._json(200, {
+                    "app": "nfs-pv-writer-app2",
+                    "purpose": "OpenShift static NFS PV migration test - app2",
+                    "data_dir": DATA_DIR,
+                    "endpoints": {
+                        "/write?msg=hello": "append message to persistent volume",
+                        "/generate?files=5&size_kb=64": "generate test files in persistent volume",
+                        "/list": "list files and hashes from persistent volume",
+                        "/healthz": "health check"
+                    }
+                })
+
+            if parsed.path == "/write":
+                msg = query.get("msg", ["hello-from-app2"])[0]
+                record = {
+                    "timestamp": int(time.time()),
+                    "message": msg,
+                    "pod": os.environ.get("HOSTNAME", "unknown"),
+                }
+                messages_path = os.path.join(DATA_DIR, "messages.jsonl")
+                with open(messages_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, sort_keys=True) + "\n")
+                with open(os.path.join(DATA_DIR, "last-write.txt"), "w", encoding="utf-8") as f:
+                    f.write(json.dumps(record, indent=2, sort_keys=True))
+                return self._json(200, {"written": record, "files": list_files()})
+
+            if parsed.path == "/generate":
+                files = int(query.get("files", ["3"])[0])
+                size_kb = int(query.get("size_kb", ["32"])[0])
+                files = max(1, min(files, 100))
+                size_kb = max(1, min(size_kb, 1024))
+                batch = int(time.time())
+                created = []
+                for i in range(files):
+                    name = f"data-{batch}-{i}.txt"
+                    path = os.path.join(DATA_DIR, "generated", name)
+                    content = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(size_kb * 1024))
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    created.append({"file": os.path.relpath(path, DATA_DIR), "size_kb": size_kb})
+                return self._json(200, {"created": created, "files": list_files()})
+
+            if parsed.path == "/list":
+                return self._json(200, {"files": list_files()})
+
+            return self._json(404, {"error": "not found", "path": parsed.path})
+
+
+    if __name__ == "__main__":
+        ensure_dirs()
+        print(f"Starting nfs-pv-writer-app2 on port {PORT}, DATA_DIR={DATA_DIR}", flush=True)
+        HTTPServer(("", PORT), Handler).serve_forever()
