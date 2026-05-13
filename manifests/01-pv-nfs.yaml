@@ -17,5 +17,5 @@ spec:
     namespace: nfs-static-pv-demo-app2
     name: static-nfs-pvc-demo-app2
   nfs:
-    server: 10.0.0.10
+    server: 10.10.74.178
     path: /exports/ocp-static-nfs-pv-demo-app2
